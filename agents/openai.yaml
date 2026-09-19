@@ -1,0 +1,4 @@
+interface:
+  display_name: "GetCut - 素材包"
+  short_description: "把任意内容做成可上传 GetCut 工作台渲染的短视频素材包"
+  default_prompt: "Use $getcut-bundle to turn this material into a short-video asset bundle for GetCut Studio."
