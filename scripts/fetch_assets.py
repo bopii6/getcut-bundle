@@ -26,7 +26,8 @@ site 四种取法：
   pexels  图库 API（要 PEXELS_API_KEY，没 key 自动降级到 bing）——概念图主力
   mixkit  素材站分类页先建索引、再按关键词挑 ID——B-roll 主力
   og      抓该网页的 og:image / 首图——品牌、机构、产品真图
-  bing    搜索引擎抓取（兜底，限速最严，抽象词极易搜成字面物）
+  wikimedia  Commons API 按词搜图，只收 CC/公有领域，license 随条目带回——概念图兜底主力
+  bing    搜索引擎抓取（最后一道兜底，已被风控时整格填不上，抽象词极易搜成字面物）
 
 每格会拿多个候选逐个验，不合格就换下一个；回执写 <素材包目录>/registry.json，
 之后用 build_manifest.py 生成 manifest.json。
@@ -59,6 +60,7 @@ MIXKIT_CATS = ("computer", "programming", "technology", "business", "work", "off
                "city", "money", "internet", "data", "security", "science")
 # 单 IP 对同一站点的礼貌上限：窗口内最多这么多次请求，超了就排队
 THROTTLE = {"api.pexels.com": (20, 60.0), "cn.bing.com": (24, 60.0),
+            "commons.wikimedia.org": (20, 60.0),
             "assets.mixkit.co": (8, 60.0), "other": (24, 60.0)}
 # 水印图库与跑题高发域，直接不要
 BAD_HOST = ("699pic", "nipic", "588ku", "51miz", "upsku", "huitu", "veer", "123rf",
@@ -270,6 +272,38 @@ def cand_og(sites: list[str]) -> list[dict]:
     return out[:MAX_CAND]
 
 
+def cand_wikimedia(queries: list[str]) -> list[dict]:
+    """Commons API 按关键词搜图：只收 CC/公有领域，license 随条目带回 manifest。
+
+    bing 被风控回壳页时的概念图主力；queries 用英文实物词，抽象词搜不到。
+    """
+    out = []
+    for q in queries:
+        api = ("https://commons.wikimedia.org/w/api.php?action=query&format=json"
+               "&generator=search&gsrsearch=" + urllib.parse.quote("filetype:bitmap " + q) +
+               "&gsrnamespace=6&gsrlimit=10&prop=imageinfo"
+               "&iiprop=url%7Csize%7Cextmetadata&iiurlwidth=1600")
+        try:
+            data = json.loads(http_get(api, 30).decode("utf-8", "ignore"))
+        except Exception:  # noqa: BLE001
+            continue
+        pages = (data.get("query") or {}).get("pages") or {}
+        rows = [p for p in pages.values() if p.get("imageinfo")]
+        rows.sort(key=lambda p: p.get("index", 99))
+        for p in rows:
+            info = p["imageinfo"][0]
+            lic = ((info.get("extmetadata") or {}).get("LicenseShortName") or {}).get("value", "")
+            if lic and "CC" not in lic.upper() and "PUBLIC" not in lic.upper():
+                continue  # fair use 之类商用不明的直接不要
+            u = info.get("thumburl") or info.get("url")
+            if not u:
+                continue
+            out.append({"url": u, "page": info.get("descriptionurl", u), "tag": q,
+                        "license": f"Wikimedia {lic}" if lic else "Wikimedia Commons",
+                        "min_w": 420, "min_h": 260, "min_ratio": 1.1})
+    return out[:MAX_CAND * 2]
+
+
 def cand_bing(queries: list[str]) -> list[dict]:
     out = []
     for q in queries:
@@ -294,11 +328,13 @@ def gather(root: Path, site: str, queries: list[str], key: str,
            slot: dict) -> list[dict]:
     try:
         if site == "pexels":
-            return cand_pexels(queries, key) if key else []
+            return cand_pexels(queries, key) if key else cand_wikimedia(queries)
         if site == "mixkit":
             return cand_mixkit(root, queries, slot.get("mixkit_id"))
         if site == "og":
             return cand_og(queries)
+        if site == "wikimedia":
+            return cand_wikimedia(queries)
         return cand_bing(queries)
     except Exception as e:  # noqa: BLE001
         print(f"  [{slot.get('num')}] {site} 取法异常 {type(e).__name__}")
@@ -377,7 +413,7 @@ def fill_one(root: Path, slot: dict, key: str, seen_md5: set) -> dict | None:
     site = slot.get("site", "pexels" if kind == "image" else "mixkit")
     queries = slot.get("queries") or []
     cands = gather(root, site, queries, key, slot)
-    if kind == "image" and site != "bing" and len(cands) < 2:
+    if kind == "image" and site not in ("bing", "wikimedia") and len(cands) < 2:
         print(f"  [{num}] {site} 候选不足，追加搜索引擎兜底候选")
         cands += gather(root, "bing", queries, key, slot)
     for cand in cands[:MAX_CAND * 2]:
