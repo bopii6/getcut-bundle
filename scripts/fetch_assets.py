@@ -607,19 +607,50 @@ def ytdlp_download(root: Path, cand: dict, want: float,
     return out
 
 
+def probe_dims(path: Path) -> tuple[int, int]:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=60).stdout.strip()
+        w, h = out.split(",")
+        return int(w), int(h)
+    except Exception:  # noqa: BLE001
+        return 0, 0
+
+
+def wm_crop_filter(w: int, h: int) -> str:
+    """安全区裁切：web 转载素材的台标和烧录字幕几乎都长在四角和底部字幕带，
+    裁掉就没了；不裁，平台会判「含水印/引导其他平台」限流甚至下架（2026-09-28 实锤）。
+    横屏源：两侧各切 17%（竖屏画布 cover 本来就裁两侧，无损失）+顶 8% 台标带+底 16% 字幕带。
+    竖屏源：cover 同比例不裁边，上下水印全入画，切顶 12% 底 16%、两侧各 8%。"""
+    if h >= w:
+        return "crop=iw*0.84:ih*0.72:(iw-iw*0.84)/2:ih*0.12"
+    return "crop=iw*0.66:ih*0.76:(iw-iw*0.66)/2:ih*0.08"
+
+
 def write_web_video(root: Path, num: str, tag: str, raw: Path) -> dict | None:
-    """web 片下载即已是精选长段，验货（可解码、够长）后落 videos/。"""
+    """web 片下载即已是精选长段；入库前做安全区裁切（去台标/烧录字幕带）。"""
     d = root / "videos"
     d.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "-", tag.lower()).strip("-")[:26] or "clip"
     for old in sorted(d.glob(f"{num}-*")):
         old.unlink()
-    dest = d / f"{num}-{slug}.mp4"
-    got = probe_video(raw)
-    if got < WEB_WANT_MIN * 0.6:
+    w, h = probe_dims(raw)
+    if w <= 0 or h <= 0:
         return None
-    out = raw.read_bytes()
-    dest.write_bytes(out)
+    dest = d / f"{num}-{slug}.mp4"
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(raw),
+         "-vf", wm_crop_filter(w, h),
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
+         "-crf", "21", "-an", "-movflags", "+faststart", str(dest)],
+        capture_output=True, text=True, timeout=600)
+    got = probe_video(dest) if not r.returncode else 0.0
+    if got < WEB_WANT_MIN * 0.6 or not dest.is_file():
+        dest.unlink(missing_ok=True)
+        return None
+    out = dest.read_bytes()
     return {"file": f"videos/{dest.name}", "md5": hashlib.md5(out).hexdigest(),
             "bytes": len(out), "duration": round(got, 2)}
 
