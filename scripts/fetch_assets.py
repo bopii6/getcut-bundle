@@ -173,7 +173,7 @@ def cut_video(src: Path, dst: Path, want: float = CUT_SECONDS) -> float:
     r = subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(start), "-to", str(end),
                         "-i", str(src), "-map", "0:v:0", "-an", "-c:v", "libx264",
                         "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "21",
-                        "-movflags", "+faststart", str(dst)],
+                        "-bf", "0", "-movflags", "+faststart", str(dst)],
                        capture_output=True, text=True, timeout=300)
     return 0.0 if r.returncode else probe_video(dst)
 
@@ -540,7 +540,7 @@ def _ffmpeg_cut(src_url: str, dst: Path, ss: float, to: float,
     cmd += ["-to", str(round(to, 2)), "-i", str(src_url),
             "-map", "0:v:0", "-an", "-c:v", "libx264",
             "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "21",
-            "-movflags", "+faststart", str(dst)]
+            "-bf", "0", "-movflags", "+faststart", str(dst)]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     return 0.0 if r.returncode else probe_video(dst)
 
@@ -625,8 +625,8 @@ def wm_crop_filter(w: int, h: int) -> str:
     横屏源：两侧各切 17%（竖屏画布 cover 本来就裁两侧，无损失）+顶 8% 台标带+底 16% 字幕带。
     竖屏源：cover 同比例不裁边，上下水印全入画，切顶 12% 底 16%、两侧各 8%。"""
     if h >= w:
-        return "crop=iw*0.84:ih*0.72:(iw-iw*0.84)/2:ih*0.12"
-    return "crop=iw*0.66:ih*0.76:(iw-iw*0.66)/2:ih*0.08"
+        return "crop=iw*0.84:ih*0.72:(iw-iw*0.84)/2:ih*0.12,scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    return "crop=iw*0.66:ih*0.76:(iw-iw*0.66)/2:ih*0.08,scale=trunc(iw/2)*2:trunc(ih/2)*2"
 
 
 def write_web_video(root: Path, num: str, tag: str, raw: Path) -> dict | None:

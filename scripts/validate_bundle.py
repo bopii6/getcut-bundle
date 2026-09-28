@@ -534,6 +534,37 @@ def _check_file_bytes(
         )
 
 
+def probe_stream(path: Path) -> dict:
+    """读视频流关键参数（start_time/宽高）。读不出返回空 dict。"""
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=start_time,width,height",
+                "-of",
+                "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        streams = (json.loads(completed.stdout or "{}").get("streams") or [{}])
+        st = streams[0]
+        return {
+            "start": float(st.get("start_time") or 0),
+            "w": int(st.get("width") or 0),
+            "h": int(st.get("height") or 0),
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def probe_duration(path: Path) -> float | None:
     """用 ffprobe 读时长，读不出来返回 None。"""
     try:
@@ -582,6 +613,18 @@ def check_videos(
             continue
         if duration < 1.0:
             report.error(f"{name} 只有 {duration:.2f} 秒，太短了，至少要几秒")
+        stream = probe_stream(path)
+        if stream.get("start", 0) > 0.001:
+            report.error(
+                f"{name} 视频轨道有 {stream['start']:.2f} 秒的起始延迟"
+                "（B帧编排产物），浏览器解码第 0 帧会确定性失败——"
+                "重新导出：ffmpeg 加 -bf 0"
+            )
+        if stream.get("w") and (stream["w"] % 2 or stream["h"] % 2):
+            report.error(
+                f"{name} 分辨率 {stream['w']}x{stream['h']} 不是偶数，"
+                "H.264/yuv420p 编码会失败——裁或缩放成偶数"
+            )
         end = entry.get("clip_end_seconds")
         start = entry.get("clip_start_seconds")
         if end is not None and end > duration + 0.1:
