@@ -22,12 +22,26 @@
  ]
 }
 
-site 四种取法：
+site 五种取法：
+  web     真实事件视频通道（发布会/事故/采访/现场）——B站免登录直下，YouTube 要
+          cookies.txt（一次性配置，见下），其余站把视频页地址填进 urls 走 yt-dlp
   pexels  图库 API（要 PEXELS_API_KEY，没 key 自动降级到 bing）——概念图主力
-  mixkit  素材站分类页先建索引、再按关键词挑 ID——B-roll 主力
+  mixkit  素材站分类页先建索引、再按关键词挑 ID——B-roll 兜底空镜
   og      抓该网页的 og:image / 首图——品牌、机构、产品真图
   wikimedia  Commons API 按词搜图，只收 CC/公有领域，license 随条目带回——概念图兜底主力
   bing    搜索引擎抓取（最后一道兜底，已被风控时整格填不上，抽象词极易搜成字面物）
+
+web 槽位专用字段：
+  want_seconds  保留多长的连续片段（默认 30，钳在 15~90）——一格顶多句，别按 9 秒碎着配
+  t_start       可选，想从第几秒开始取（发布会人物登场这类有讲究的段）；缺省取原片 15% 处避开片头
+  platform      可选 bili / youtube / auto（默认 auto：B站优先，有 cookies 再试 YouTube，最后 urls）
+  urls          可选，直接给视频页地址（B站/YouTube/任意 yt-dlp 认的站）
+  queries       搜什么词：B站用中文事件词最好使，YouTube 用英文
+
+YouTube cookies 一次性配置（本机 Windows 下 --cookies-from-browser 会撞 DPAPI 锁，别用）：
+  浏览器装个「Get cookies.txt LOCALLY」扩展，在 youtube.com 导出 Netscape 格式，
+  存到 ~/.getcut/youtube_cookies.txt（或素材包目录 cookies.txt，或设环境变量
+  GETCUT_YTDLP_COOKIES）。没这文件时 YouTube 格自动跳过并提示，不影响 B站。
 
 每格会拿多个候选逐个验，不合格就换下一个；回执写 <素材包目录>/registry.json，
 之后用 build_manifest.py 生成 manifest.json。
@@ -53,7 +67,8 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 MIN_IMG_W, MIN_IMG_H, MIN_RATIO = 1000, 520, 1.25
 IMG_BYTES_MIN, VID_BYTES_MIN = 60_000, 400_000
-CUT_SECONDS = 9.0
+# mixkit 空镜也取长段：深度稿一格画面 10~12 秒，取 30 秒连续段才盖得住（源不够长就整段拿）
+CUT_SECONDS = 30.0
 MAX_CAND = 6
 INDEX_TTL = 24 * 3600
 MIXKIT_CATS = ("computer", "programming", "technology", "business", "work", "office",
@@ -61,6 +76,7 @@ MIXKIT_CATS = ("computer", "programming", "technology", "business", "work", "off
 # 单 IP 对同一站点的礼貌上限：窗口内最多这么多次请求，超了就排队
 THROTTLE = {"api.pexels.com": (20, 60.0), "cn.bing.com": (24, 60.0),
             "commons.wikimedia.org": (20, 60.0),
+            "api.bilibili.com": (12, 60.0), "www.bilibili.com": (6, 60.0),
             "assets.mixkit.co": (8, 60.0), "other": (24, 60.0)}
 # 水印图库与跑题高发域，直接不要
 BAD_HOST = ("699pic", "nipic", "588ku", "51miz", "upsku", "huitu", "veer", "123rf",
@@ -324,6 +340,304 @@ def cand_bing(queries: list[str]) -> list[dict]:
     return out[:MAX_CAND * 2]
 
 
+# ---------------------------------------------------------------- web：真实事件视频
+# 图库里没有热点事件的"本尊画面"——发布会、事故、采访、现场，只能去视频站拿。
+# B站免登录可下（抓个 buvid3 即可），YouTube 被 Google 风控要求登录态（cookies.txt），
+# 其余站交给 yt-dlp 通用引擎。下载回来的是连续长段（want_seconds），不是 9 秒碎镜。
+WEB_WANT_MIN, WEB_WANT_MAX = 15.0, 90.0
+WEB_WANT_DEFAULT = 30.0
+_BILI_COOKIE: list[str] = []
+_YT_HINT_SHOWN = False
+
+BILI_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+def bili_cookie() -> str:
+    """B站风控只认 buvid3：先访问一次首页拿 cookie，之后搜索、playurl 都带着它。"""
+    if _BILI_COOKIE:
+        return _BILI_COOKIE[0]
+    throttle("www.bilibili.com")
+    req = urllib.request.Request("https://www.bilibili.com/",
+                                 headers={"User-Agent": BILI_UA})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        for c in (r.headers.get_all("Set-Cookie") or []):
+            m = re.match(r"buvid3=([^;]+)", c)
+            if m:
+                _BILI_COOKIE.append("buvid3=" + m.group(1))
+                break
+    return _BILI_COOKIE[0] if _BILI_COOKIE else ""
+
+
+def bili_api(path: str, params: dict) -> dict | None:
+    qs = urllib.parse.urlencode(params)
+    req = urllib.request.Request(
+        "https://api.bilibili.com" + path + "?" + qs,
+        headers={"User-Agent": BILI_UA, "Referer": "https://www.bilibili.com/",
+                 "Cookie": bili_cookie()})
+    throttle("api.bilibili.com")
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            return json.loads(r.read().decode("utf-8", "ignore"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _parse_dur(s: str) -> float:
+    """B站时长有两种写法：22:44 或 1:02:33。"""
+    parts = [p for p in str(s).split(":") if p.strip().isdigit()]
+    if not parts:
+        return 0.0
+    nums = [int(p) for p in parts]
+    while len(nums) < 3:
+        nums.insert(0, 0)
+    return nums[0] * 3600 + nums[1] * 60 + nums[2]
+
+
+def _tokens(s: str) -> set[str]:
+    return {t for t in re.split(r"[\s|,，/·+]+", str(s).lower()) if t}
+
+
+def cand_bili(queries: list[str]) -> list[dict]:
+    """B站搜索：真实事件视频的主力源。按词面重合 + 播放量排，跳过合集和超长录像。"""
+    out = []
+    for q in queries:
+        data = bili_api("/x/web-interface/search/type",
+                        {"search_type": "video", "keyword": q, "page": 1})
+        rows = ((data or {}).get("data") or {}).get("result") or []
+        qt = _tokens(q)
+        for v in rows:
+            title = re.sub(r"<[^>]+>", "", str(v.get("title", "")))
+            dur = _parse_dur(v.get("duration", ""))
+            # 合集/直播录像（>75 分钟）与纯预告碎片（<50 秒）都不好裁，跳过
+            if dur < 50 or dur > 4500:
+                continue
+            overlap = len(qt & _tokens(title)) / max(len(qt), 1)
+            score = overlap * 2 + min(v.get("play", 0) / 100_000, 1.0)
+            out.append({"platform": "bili", "bvid": v.get("bvid", ""),
+                        "title": title, "duration": dur, "tag": title[:40],
+                        "score": score,
+                        "page": f"https://www.bilibili.com/video/{v.get('bvid', '')}",
+                        "license": "B站转载素材，授权未确认"})
+        out.sort(key=lambda c: -c["score"])
+    # 多个词的结果按分混排，逐词去重
+    seen: set[str] = set()
+    uniq = []
+    for c in sorted(out, key=lambda c: -c["score"]):
+        if c["bvid"] not in seen:
+            seen.add(c["bvid"])
+            uniq.append(c)
+    return uniq
+
+
+def yt_cookies(root: Path) -> str:
+    """cookies.txt 的查找顺序：环境变量 → 素材包目录 → ~/.getcut/。"""
+    for p in (os.environ.get("GETCUT_YTDLP_COOKIES", "").strip(),
+              str(root / "cookies.txt"),
+              str(Path.home() / ".getcut" / "youtube_cookies.txt")):
+        if p and Path(p).is_file():
+            return p
+    return ""
+
+
+def cand_youtube(root: Path, queries: list[str]) -> list[dict]:
+    """YouTube 搜索用 --flat-playlist 只列结果不碰播放器（避开机器人墙）；
+    真正下载那一步才需要 cookies，没有就整路跳过。"""
+    global _YT_HINT_SHOWN
+    cookies = yt_cookies(root)
+    if not cookies:
+        if not _YT_HINT_SHOWN:
+            _YT_HINT_SHOWN = True
+            print("  [web] YouTube 未配置 cookies.txt，本包只用 B站与直链；"
+                  "配置方法见 fetch_assets.py 文件头")
+        return []
+    out = []
+    for q in queries:
+        try:
+            r = subprocess.run(
+                ["yt-dlp", "--flat-playlist", "--no-warnings", "--cookies", cookies,
+                 "--print", "%(id)s\t%(duration)s\t%(title)s\t%(channel)s",
+                 "ytsearch4:" + q],
+                capture_output=True, text=True, timeout=90, encoding="utf-8",
+                errors="replace")
+        except Exception:  # noqa: BLE001
+            continue
+        for line in (r.stdout or "").splitlines():
+            bits = (line.split("\t") + ["", "", "", ""])[:4]
+            vid, dur, title, ch = bits
+            if not vid or vid.startswith("ERROR"):
+                continue
+            try:
+                d = float(dur)
+            except ValueError:
+                d = 0.0
+            if d and (d < 50 or d > 4500):
+                continue
+            out.append({"platform": "youtube", "vid": vid, "title": title,
+                        "duration": d, "tag": f"{title} {ch}".strip()[:40],
+                        "score": 1.0,
+                        "page": f"https://www.youtube.com/watch?v={vid}",
+                        "license": "YouTube 转载素材，授权未确认"})
+    return out
+
+
+def _ffmpeg_cut(src_url: str, dst: Path, ss: float, to: float,
+                headers: list[str] | None = None) -> float:
+    """从任意源（网络直链或本地文件）裁段并统一转码：静音 H.264 yuv420p。"""
+    cmd = ["ffmpeg", "-y", "-v", "error"]
+    for h in headers or []:
+        cmd += ["-headers", h]
+    if ss > 0:
+        cmd += ["-ss", str(round(ss, 2))]
+    cmd += ["-to", str(round(to, 2)), "-i", str(src_url),
+            "-map", "0:v:0", "-an", "-c:v", "libx264",
+            "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "21",
+            "-movflags", "+faststart", str(dst)]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    return 0.0 if r.returncode else probe_video(dst)
+
+
+def bili_download(cand: dict, raw: Path, want: float, t_start: float | None) -> float:
+    """B站下载：view 拿 cid → playurl html5 拿 720p 直链 → ffmpeg 带 Referer 拉流裁段。"""
+    view = bili_api("/x/web-interface/view", {"bvid": cand["bvid"]})
+    if not view or view.get("code") != 0:
+        return 0.0
+    v = view["data"]
+    dur = float(v.get("duration") or cand.get("duration") or 0)
+    if dur < want + 5:
+        want = max(WEB_WANT_MIN, min(dur * 0.5, want))
+    ss = t_start if t_start is not None else max(dur * 0.15, 0.3)
+    ss = max(0.0, min(ss, max(dur - want - 1.0, 0.0)))
+    pu = bili_api("/x/player/playurl",
+                  {"bvid": cand["bvid"], "cid": v["cid"], "qn": 64,
+                   "platform": "html5", "high_quality": 1})
+    durl = ((pu or {}).get("data") or {}).get("durl") or []
+    if not durl or not durl[0].get("url"):
+        return 0.0
+    headers = f"Referer: https://www.bilibili.com/\r\nUser-Agent: {BILI_UA}\r\n"
+    return _ffmpeg_cut(durl[0]["url"], raw, ss, ss + want, headers=[headers])
+
+
+def ytdlp_download(root: Path, cand: dict, want: float,
+                   t_start: float | None, raw: Path) -> float:
+    """YouTube 与其他站：yt-dlp 通用引擎，--download-sections 只拉要用的那一段，
+    落到 raw 再由调用方验货入库。"""
+    url = cand.get("page", "")
+    if not url:
+        return 0.0
+    cookies = yt_cookies(root)
+    dur = float(cand.get("duration") or 0)
+    if dur >= want + 5:
+        ss = t_start if t_start is not None else max(dur * 0.15, 0.3)
+        ss = max(0.0, min(ss, max(dur - want - 1.0, 0.0)))
+        section = f"*{round(ss, 1)}-{round(ss + want, 1)}"
+    else:
+        section = "*0-inf"
+    tmp_tpl = str(root / ".tmp" / "ytdl_%(id)s.%(ext)s")
+    cmd = ["yt-dlp", "--no-warnings", "-f",
+           "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]/bv*/b",
+           "--download-sections", section, "-o", tmp_tpl]
+    if cookies:
+        cmd += ["--cookies", cookies]
+    cmd.append(url)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=900,
+                       encoding="utf-8", errors="replace")
+    m = re.search(r"Destination: (.+)", r.stdout or "")
+    got = Path(m.group(1).strip()) if m else None
+    if not got or not got.is_file():
+        m2 = re.search(r"has already been downloaded to (.+)", r.stdout or "")
+        got = Path(m2.group(1).strip()) if m2 else None
+    if not got or not got.is_file():
+        for p in sorted((root / ".tmp").glob("ytdl_*")) if (root / ".tmp").is_dir() else []:
+            got = p
+            break
+    if not got or not got.is_file():
+        return 0.0
+    d = probe_video(got)
+    if d <= 0:
+        got.unlink(missing_ok=True)
+        return 0.0
+    out = _ffmpeg_cut(str(got), raw, 0.0, min(want, d))
+    got.unlink(missing_ok=True)
+    return out
+
+
+def write_web_video(root: Path, num: str, tag: str, raw: Path) -> dict | None:
+    """web 片下载即已是精选长段，验货（可解码、够长）后落 videos/。"""
+    d = root / "videos"
+    d.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^a-z0-9]+", "-", tag.lower()).strip("-")[:26] or "clip"
+    for old in sorted(d.glob(f"{num}-*")):
+        old.unlink()
+    dest = d / f"{num}-{slug}.mp4"
+    got = probe_video(raw)
+    if got < WEB_WANT_MIN * 0.6:
+        return None
+    out = raw.read_bytes()
+    dest.write_bytes(out)
+    return {"file": f"videos/{dest.name}", "md5": hashlib.md5(out).hexdigest(),
+            "bytes": len(out), "duration": round(got, 2)}
+
+
+def fill_web(root: Path, slot: dict, seen_md5: set) -> dict | None:
+    """site=web 的专用通道：搜索→按候选顺序下载→验货，一格顶多句的长镜头。"""
+    num = slot["num"]
+    want = float(slot.get("want_seconds") or WEB_WANT_DEFAULT)
+    want = max(WEB_WANT_MIN, min(WEB_WANT_MAX, want))
+    t_start = slot.get("t_start")
+    t_start = float(t_start) if t_start is not None else None
+    queries = slot.get("queries") or []
+    urls = slot.get("urls") or []
+    platform = (slot.get("platform") or "auto").lower()
+
+    cands: list[dict] = []
+    if platform in ("auto", "bili"):
+        cands += cand_bili(queries)
+    if platform in ("auto", "youtube"):
+        cands += cand_youtube(root, queries)
+    for u in urls:
+        plat = "bili" if "bilibili.com" in u else \
+               ("youtube" if "youtube.com" in u or "youtu.be" in u else "generic")
+        cands.append({"platform": plat, "page": u,
+                      "tag": urllib.parse.urlparse(u).path.strip("/")[-40:] or u[-40:],
+                      "license": "网络转载素材，授权未确认"})
+
+    raw = root / ".tmp" / f"{num}.web.mp4"
+    raw.parent.mkdir(exist_ok=True)
+    for cand in cands[:6]:
+        try:
+            if cand["platform"] == "bili":
+                got = bili_download(cand, raw, want, t_start)
+            elif cand["platform"] in ("youtube", "generic"):
+                got = ytdlp_download(root, cand, want, t_start, raw)
+            else:
+                continue
+        except Exception as e:  # noqa: BLE001
+            print(f"  [{num}] {cand['platform']} 下载异常 {type(e).__name__}")
+            continue
+        if got <= 0:
+            continue
+        rec = write_web_video(root, num, cand.get("tag", "clip"), raw)
+        if not rec:
+            continue
+        if rec["md5"] in seen_md5:
+            (root / rec["file"]).unlink(missing_ok=True)
+            continue
+        seen_md5.add(rec["md5"])
+        rec.update({"num": num, "kind": "video", "site": "web",
+                    "platform": cand.get("platform", ""),
+                    "query": slot.get("queries", [""])[0] if slot.get("queries") else "",
+                    "source_url": cand.get("page", ""),
+                    "source_title": cand.get("title", ""),
+                    "license": cand.get("license", ""),
+                    "summary": slot.get("summary", ""), "tags": slot.get("tags", []),
+                    "anchor": slot.get("anchor", "")})
+        print(f"  [{num}] OK {rec['file']} {rec['duration']}s ← {cand.get('page', '')[:60]}")
+        return rec
+    raw.unlink(missing_ok=True)
+    return None
+
+
 def gather(root: Path, site: str, queries: list[str], key: str,
            slot: dict) -> list[dict]:
     try:
@@ -411,6 +725,8 @@ def fill_one(root: Path, slot: dict, key: str, seen_md5: set) -> dict | None:
     num = slot["num"]
     kind = slot.get("kind", "image")
     site = slot.get("site", "pexels" if kind == "image" else "mixkit")
+    if kind == "video" and site == "web":
+        return fill_web(root, slot, seen_md5)
     queries = slot.get("queries") or []
     cands = gather(root, site, queries, key, slot)
     if kind == "image" and site not in ("bing", "wikimedia") and len(cands) < 2:

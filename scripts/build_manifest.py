@@ -66,7 +66,8 @@ def main() -> int:
         "schema_version": 1,
         "generated_by": clean(a.generated_by, 200),
         "notes": (f"由 slots.json 槽位表并发抓取：{n_img} 张图 + {n_vid} 段视频，"
-                  "顺序按口播推进排布；视频已裁成单镜头，无需再填选段时间。"),
+                  "顺序按口播推进排布；视频已裁好（web 连续长段 / mixkit 9 秒空镜），"
+                  "无需再填选段时间。"),
         "assets": assets,
     }
     out = root / "manifest.json"

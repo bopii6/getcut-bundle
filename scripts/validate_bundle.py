@@ -563,7 +563,10 @@ def probe_duration(path: Path) -> float | None:
         return None
 
 
-def check_videos(resolved: list[tuple[Path, dict[str, Any]]], report: Report) -> None:
+def check_videos(
+    resolved: list[tuple[Path, dict[str, Any]]], report: Report,
+    web_files: frozenset[str] = frozenset(),
+) -> None:
     """核对视频可解码，且选段窗口落在真实时长内。"""
     videos = [(path, entry) for path, entry in resolved if entry["kind"] == "video"]
     if not videos:
@@ -591,10 +594,13 @@ def check_videos(resolved: list[tuple[Path, dict[str, Any]]], report: Report) ->
                 f"{duration:.2f} 秒"
             )
         if start is None and end is None and duration > 20.0:
-            report.warn(
-                f"{name} 长 {duration:.1f} 秒却没标选段，GetCut 会从第 0 秒开始取，"
-                "建议裁成几秒的短镜头或补上 clip_start_seconds / clip_end_seconds"
-            )
+            if entry.get("file", "") in web_files:
+                pass  # web 抓回来的是已裁好的连续长段，从第 0 秒顺取正是想要的
+            else:
+                report.warn(
+                    f"{name} 长 {duration:.1f} 秒却没标选段，GetCut 会从第 0 秒开始取，"
+                    "建议裁成几秒的短镜头或补上 clip_start_seconds / clip_end_seconds"
+                )
 
 
 def check_orphans(
@@ -655,9 +661,18 @@ def main(argv: list[str]) -> int:
 
     resolved: list[tuple[Path, dict[str, Any]]] = []
     manifest = load_json(bundle_dir / "manifest.json", report)
+    web_files: set[str] = set()
+    reg_path = bundle_dir / "registry.json"
+    if reg_path.is_file():
+        try:
+            for row in json.loads(reg_path.read_text(encoding="utf-8")):
+                if row.get("site") == "web":
+                    web_files.add(row.get("file", ""))
+        except Exception:  # noqa: BLE001
+            pass  # registry 是抓取回执，缺了不影响校验，只是少了 web 长段豁免
     if manifest is not None:
         resolved = validate_manifest(manifest, bundle_dir, report)
-        check_videos(resolved, report)
+        check_videos(resolved, report, frozenset(web_files))
     check_orphans(bundle_dir, resolved, report)
     check_foreign_declarations(bundle_dir, report)
 
@@ -668,7 +683,27 @@ def main(argv: list[str]) -> int:
     print(f"已声明素材: {images} 张图片, {videos} 段视频")
     if content is not None and isinstance(content.get("script"), str):
         script = content["script"]
-        print(f"口播文案: {len(script)} 字, 预计成片约 {len(script) / 6:.0f} 秒")
+        est = len(script) / 6.0
+        print(f"口播文案: {len(script)} 字, 预计成片约 {est:.0f} 秒")
+        total = 0.0
+        if shutil.which("ffprobe"):
+            for path, entry in resolved:
+                if entry["kind"] != "video":
+                    continue
+                d = probe_duration(path)
+                if d:
+                    total += d
+        if total and total < est * 0.6:
+            report.warn(
+                f"视频总长 {total:.0f} 秒，只够盖成片约 {total / est:.0%}"
+                f"（预计 {est:.0f} 秒）——视频为主、图片只是空镜，"
+                "缺的格子会退化成图片或文字卡，考虑再补几格 web 视频"
+            )
+    if images > 8:
+        report.warn(
+            f"图片 {images} 张偏多——视频为主、图片只是空镜，"
+            "深度片留 3 到 5 张就够，图片堆多了成片会像 PPT"
+        )
 
     for message in report.warnings:
         print(f"[告警] {message}")
