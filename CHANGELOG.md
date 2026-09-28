@@ -2,6 +2,14 @@
 
 本技能为自有技能，不连远程仓库、没有自动更新；改动直接改本目录并在这里补一条。
 
+## 1.10.1 — 2026-09-28（YouTube 通道全链实测打通）
+
+- **YouTube 三道门+一道保鲜，全部实测拿下**：①带 cookie 的请求必须 `player_client=mweb`（默认 web 客户端回 "The page needs to be reloaded"，tv 同拒）；②EJS n 挑战要装 `pip install -U "yt-dlp[default]"` 且显式 `--js-runtimes node:<路径>`（yt-dlp 自动探测在部分环境失灵）；③媒体流被扣要 PO token——`pip install bgutil-ytdlp-pot-provider` + clone Brainicism 仓库到 `~/bgutil-ytdlp-pot-provider` 并 `npm ci && npx tsc`；④**cookies 保鲜**：PSIDTS 令牌十几分钟轮换，导出超半小时必被"机器人验证"拦——技能开工前检查 cookie 新鲜度（>20 分钟且本机有 `~/.getcut/dump_yt_cookies.py` 专用登录窗口脚本就静默重导）。
+- **Windows `--download-sections` 会崩 ffmpeg（exit -58）**：改整段下载（≤1080p，yt-dlp 自动合并音轨）后本地 `_ffmpeg_cut` 裁段，稳定换带宽。
+- **修 `shutil` 漏 import**：yt_args 里的 NameError 被 `except Exception` 静默吞掉，YouTube 格恒 0 候选——教训：新函数用标准库前先看文件头 import 区。
+- 搜索超时 90→240 秒（BotGuard 冷启动要 40~80 秒）；机器人验证失败的报错改成可操作的话术。
+- E2E 实证：`platform:"youtube"` 槽位真下到 "Tesla Cybercab First Ride" 30 秒 1080p 片段（车内 FSD 可视化画面）；auto 槽 B站照常。SKILL.md「YouTube 一次性配置（三件套）」同步改写。
+
 ## 1.10.0 — 2026-09-28
 
 - **`fetch_assets.py` 新增 `web` 真实视频通道（视频主力）**：热点事件的"本尊画面"（发布会/事故/采访/现场）直接去视频站下载，不再拿图库空镜硬顶。B站免登录直下（首页取 buvid3 → search API 搜候选 → view/playurl API 拿 720p 直链 → ffmpeg 带 Referer 拉流裁段，实测 30 秒发布会实录一次成）；YouTube 走 yt-dlp + cookies.txt（Windows 的 `--cookies-from-browser` 撞 DPAPI 锁不可用，需浏览器扩展一次性导出到 `~/.getcut/youtube_cookies.txt`）；任意其他站给 `urls` 直链走 yt-dlp 通用引擎。

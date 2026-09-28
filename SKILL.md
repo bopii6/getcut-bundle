@@ -231,7 +231,13 @@ videos/
 - `urls`：已经知道是哪个视频就直接给地址，不再搜索；
 - `platform`：默认 auto（B站优先 → 有 cookies 试 YouTube → urls 兜底）。
 
-**YouTube cookies 一次性配置**：Windows 下 `--cookies-from-browser` 会撞 DPAPI 锁读不出来，别用。让用户在浏览器装「Get cookies.txt LOCALLY」扩展，在 youtube.com 导出 Netscape 格式，存到 `~/.getcut/youtube_cookies.txt`（或素材包目录 `cookies.txt`）。没配置时 YouTube 格自动跳过并提示，B站不受影响。
+**YouTube 一次性配置（三件套）**：缺任何一件 YouTube 格就出不来（脚本自动提示），B站不受影响。
+
+1. **登录 cookies**：存到 `~/.getcut/youtube_cookies.txt`（或素材包目录 `cookies.txt`）。来源二选一：专用登录窗口脚本（用户在窗口里登录一次，脚本经浏览器调试口自动导出，profile 持久记住登录，以后可自动刷新），或浏览器扩展「Get cookies.txt LOCALLY」手动导出 Netscape 格式。Windows 下 `--cookies-from-browser` 会撞 DPAPI 锁，别用。
+2. **挑战求解器**：`pip install -U "yt-dlp[default]"`（EJS 组件）+ 机器上有 Node（PATH 或 `C:\Program Files\nodejs\`）。
+3. **PO token**：`pip install bgutil-ytdlp-pot-provider`，然后 `git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider ~/bgutil-ytdlp-pot-provider`，`cd ~/bgutil-ytdlp-pot-provider/server && npm ci && npx tsc`。yt-dlp 自动发现并调用，无需传参。
+
+实测定案（2026-09-28）：带 cookie 的请求必须配 `player_client=mweb`（默认 web 客户端回 "The page needs to be reloaded"）；Windows 上 `--download-sections` 会崩 ffmpeg，脚本已改整段下载（≤1080p）后本地裁，无需配置。
 
 **key 从哪来**：让用户自己去 `pexels.com/api` 免费申请一把，运行时用环境变量 `PEXELS_API_KEY` 或 `--pexels-key` 传进脚本。**任何情况下都不要把 key 写进 skill、写进素材包、或者替用户去申请。** 配额是每把 key 每月 25000 次请求，一个素材包大约用掉 30 到 50 次。
 

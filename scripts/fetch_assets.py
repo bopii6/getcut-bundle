@@ -38,10 +38,14 @@ web 槽位专用字段：
   urls          可选，直接给视频页地址（B站/YouTube/任意 yt-dlp 认的站）
   queries       搜什么词：B站用中文事件词最好使，YouTube 用英文
 
-YouTube cookies 一次性配置（本机 Windows 下 --cookies-from-browser 会撞 DPAPI 锁，别用）：
-  浏览器装个「Get cookies.txt LOCALLY」扩展，在 youtube.com 导出 Netscape 格式，
-  存到 ~/.getcut/youtube_cookies.txt（或素材包目录 cookies.txt，或设环境变量
-  GETCUT_YTDLP_COOKIES）。没这文件时 YouTube 格自动跳过并提示，不影响 B站。
+YouTube 一次性配置（三件套，缺一则 YouTube 格不出、自动提示，不影响 B站）：
+  ①cookies：登录态必须。专用登录窗口脚本/浏览器扩展导出 Netscape 格式均可，存到
+    ~/.getcut/youtube_cookies.txt（或素材包目录 cookies.txt，或环境变量 GETCUT_YTDLP_COOKIES）。
+    （本机 Windows 下 --cookies-from-browser 会撞 DPAPI 锁，别用）
+  ②挑战求解器：pip install -U "yt-dlp[default]"（EJS）+ 机器上有 Node（PATH 或标准位置）
+  ③PO token：pip install bgutil-ytdlp-pot-provider，再
+    git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider ~/bgutil-ytdlp-pot-provider
+    cd ~/bgutil-ytdlp-pot-provider/server && npm ci && npx tsc
 
 每格会拿多个候选逐个验，不合格就换下一个；回执写 <素材包目录>/registry.json，
 之后用 build_manifest.py 生成 manifest.json。
@@ -53,6 +57,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -348,6 +353,7 @@ WEB_WANT_MIN, WEB_WANT_MAX = 15.0, 90.0
 WEB_WANT_DEFAULT = 30.0
 _BILI_COOKIE: list[str] = []
 _YT_HINT_SHOWN = False
+_YT_REFRESHED = False
 
 BILI_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -440,25 +446,67 @@ def yt_cookies(root: Path) -> str:
     return ""
 
 
+def yt_args(root: Path) -> list[str]:
+    """YouTube 三道门的公共参数（2026-09-28 实测定案）：
+    ①登录 cookies（没有就什么都免谈）；②mweb 播放器客户端——默认 web 客户端
+    对带 cookie 的请求回「The page needs to be reloaded」，mweb 不挑；
+    ③EJS n 挑战要 node 运行时——yt-dlp 的自动探测在部分环境失灵，显式指路最稳。
+    PO token（bgutil 插件）装好后 yt-dlp 自动调用，不需要参数。"""
+    args = ["--extractor-args", "youtube:player_client=mweb"]
+    cookies = yt_cookies(root)
+    if cookies:
+        args += ["--cookies", cookies]
+    node = shutil.which("node")
+    if not node:
+        for p in (r"C:\Program Files\nodejs\node.exe",
+                  r"C:\Program Files (x86)\nodejs\node.exe"):
+            if Path(p).is_file():
+                node = p
+                break
+    if node:
+        args += ["--js-runtimes", f"node:{node}"]
+    return args
+
+
+def maybe_refresh_yt_cookies(root: Path, max_age: float = 1200.0) -> None:
+    """cookies 里的 PSIDTS 令牌十几分钟就轮换，导出超过半小时就会被 YouTube 拦。
+    本机若有专用登录窗口的刷新脚本（~/.getcut/dump_yt_cookies.py），cookies 太旧
+    就静默重导一次；脚本不在/窗口没开/cookies 还新鲜，都照旧用现有的。"""
+    global _YT_REFRESHED
+    if _YT_REFRESHED:
+        return
+    _YT_REFRESHED = True
+    script = Path.home() / ".getcut" / "dump_yt_cookies.py"
+    if not script.is_file():
+        return
+    cookies = yt_cookies(root)
+    if not cookies or time.time() - Path(cookies).stat().st_mtime < max_age:
+        return
+    try:
+        subprocess.run([sys.executable, str(script)], capture_output=True, timeout=120)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def cand_youtube(root: Path, queries: list[str]) -> list[dict]:
-    """YouTube 搜索用 --flat-playlist 只列结果不碰播放器（避开机器人墙）；
-    真正下载那一步才需要 cookies，没有就整路跳过。"""
+    """YouTube 搜索用 --flat-playlist 只列结果不碰播放器；没有 cookies 就整路跳过。"""
     global _YT_HINT_SHOWN
+    maybe_refresh_yt_cookies(root)
     cookies = yt_cookies(root)
     if not cookies:
         if not _YT_HINT_SHOWN:
             _YT_HINT_SHOWN = True
             print("  [web] YouTube 未配置 cookies.txt，本包只用 B站与直链；"
-                  "配置方法见 fetch_assets.py 文件头")
+                  "配置方法见 SKILL.md「YouTube 一次性配置」")
         return []
     out = []
     for q in queries:
         try:
             r = subprocess.run(
-                ["yt-dlp", "--flat-playlist", "--no-warnings", "--cookies", cookies,
-                 "--print", "%(id)s\t%(duration)s\t%(title)s\t%(channel)s",
+                ["yt-dlp", "--flat-playlist", "--no-warnings"] + yt_args(root) +
+                ["--print", "%(id)s\t%(duration)s\t%(title)s\t%(channel)s",
                  "ytsearch4:" + q],
-                capture_output=True, text=True, timeout=90, encoding="utf-8",
+                capture_output=True, text=True, timeout=240, encoding="utf-8",
                 errors="replace")
         except Exception:  # noqa: BLE001
             continue
@@ -519,45 +567,42 @@ def bili_download(cand: dict, raw: Path, want: float, t_start: float | None) -> 
 
 
 def ytdlp_download(root: Path, cand: dict, want: float,
-                   t_start: float | None, raw: Path) -> float:
-    """YouTube 与其他站：yt-dlp 通用引擎，--download-sections 只拉要用的那一段，
-    落到 raw 再由调用方验货入库。"""
+                   t_start: float | None, raw: Path, num: str) -> float:
+    """YouTube 与其他站：yt-dlp 通用引擎。
+
+    实测 --download-sections 在 Windows 上会崩 ffmpeg（exit -58），所以整段下载
+    （≤1080p，yt-dlp 自动合并音轨）后本地裁出 want 秒——多花点带宽，换稳定。"""
     url = cand.get("page", "")
     if not url:
         return 0.0
-    cookies = yt_cookies(root)
-    dur = float(cand.get("duration") or 0)
-    if dur >= want + 5:
-        ss = t_start if t_start is not None else max(dur * 0.15, 0.3)
-        ss = max(0.0, min(ss, max(dur - want - 1.0, 0.0)))
-        section = f"*{round(ss, 1)}-{round(ss + want, 1)}"
-    else:
-        section = "*0-inf"
-    tmp_tpl = str(root / ".tmp" / "ytdl_%(id)s.%(ext)s")
-    cmd = ["yt-dlp", "--no-warnings", "-f",
-           "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]/bv*/b",
-           "--download-sections", section, "-o", tmp_tpl]
-    if cookies:
-        cmd += ["--cookies", cookies]
-    cmd.append(url)
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=900,
+    tmp_tpl = str(root / ".tmp" / f"ytdl_{num}_%(id)s.%(ext)s")
+    cmd = (["yt-dlp", "--no-warnings", "-f",
+            "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]/bv*/b",
+            "-o", tmp_tpl] + yt_args(root) + [url])
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800,
                        encoding="utf-8", errors="replace")
-    m = re.search(r"Destination: (.+)", r.stdout or "")
-    got = Path(m.group(1).strip()) if m else None
+    got = None
+    # 合并产物是 ytdl_<num>_<id>.<ext>；排除 .part 半成品与合并前的 .fN 分轨
+    cands = [p for p in (root / ".tmp").glob(f"ytdl_{num}_*")
+             if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov")
+             and ".part" not in p.name and ".f" not in p.stem[len(f"ytdl_{num}_"):]]
+    if cands:
+        got = max(cands, key=lambda p: p.stat().st_size)
     if not got or not got.is_file():
-        m2 = re.search(r"has already been downloaded to (.+)", r.stdout or "")
-        got = Path(m2.group(1).strip()) if m2 else None
-    if not got or not got.is_file():
-        for p in sorted((root / ".tmp").glob("ytdl_*")) if (root / ".tmp").is_dir() else []:
-            got = p
-            break
-    if not got or not got.is_file():
+        err = (r.stderr or r.stdout or "").strip()
+        if "Sign in to confirm" in err:
+            print(f"  [{num}] YouTube 拦了（机器人验证）：cookies 轮换失效或请求过频——"
+                  "打开专用登录窗口后重跑 --only 这格；B站格不受影响")
+        else:
+            print(f"  [{num}] yt-dlp 下载失败：{err[-200:]}")
         return 0.0
     d = probe_video(got)
     if d <= 0:
         got.unlink(missing_ok=True)
         return 0.0
-    out = _ffmpeg_cut(str(got), raw, 0.0, min(want, d))
+    ss = t_start if t_start is not None else max(d * 0.15, 0.3)
+    ss = max(0.0, min(ss, max(d - min(want, d) - 1.0, 0.0)))
+    out = _ffmpeg_cut(str(got), raw, ss, min(ss + want, d))
     got.unlink(missing_ok=True)
     return out
 
@@ -609,7 +654,7 @@ def fill_web(root: Path, slot: dict, seen_md5: set) -> dict | None:
             if cand["platform"] == "bili":
                 got = bili_download(cand, raw, want, t_start)
             elif cand["platform"] in ("youtube", "generic"):
-                got = ytdlp_download(root, cand, want, t_start, raw)
+                got = ytdlp_download(root, cand, want, t_start, raw, num)
             else:
                 continue
         except Exception as e:  # noqa: BLE001
